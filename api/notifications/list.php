@@ -24,16 +24,44 @@ try {
     $stmt = $pdo->prepare("
         SELECT
             n.id,
+            n.actor_user_id,
             n.type,
             n.title,
             n.message,
             n.group_id,
             n.order_id,
+
+            CONCAT(
+                COALESCE(actor.first_name, ''),
+                CASE
+                    WHEN actor.first_name IS NOT NULL
+                     AND actor.last_name IS NOT NULL
+                    THEN ' '
+                    ELSE ''
+                END,
+                COALESCE(actor.last_name, '')
+            ) AS actor_name,
+
+            g.title AS group_title,
+            o.title AS order_title,
+
             n.is_read,
             n.created_at,
             n.read_at
+
         FROM notifications n
+
+        LEFT JOIN users actor
+            ON actor.id = n.actor_user_id
+
+        LEFT JOIN `groups` g
+            ON g.id = n.group_id
+
+        LEFT JOIN orders o
+            ON o.id = n.order_id
+
         WHERE n.user_id = ?
+
         ORDER BY n.created_at DESC, n.id DESC
     ");
 
@@ -60,6 +88,11 @@ try {
 
         $notification['id'] = (int) $notification['id'];
 
+        $notification['actor_user_id'] =
+            $notification['actor_user_id'] !== null
+                ? (int) $notification['actor_user_id']
+                : null;
+
         $notification['group_id'] =
             $notification['group_id'] !== null
                 ? (int) $notification['group_id']
@@ -72,6 +105,30 @@ try {
 
         $notification['is_read'] =
             (bool) $notification['is_read'];
+
+        /*
+         * MySQL timestamp را به ISO 8601 UTC تبدیل می‌کنیم
+         * تا Flutter بتواند آن را بدون ابهام به زمان محلی تبدیل کند.
+         */
+        if (!empty($notification['created_at'])) {
+            $date = new DateTime(
+                $notification['created_at'],
+                new DateTimeZone('UTC')
+            );
+
+            $notification['created_at'] =
+                $date->format('Y-m-d\TH:i:s\Z');
+        }
+
+        if (!empty($notification['read_at'])) {
+            $date = new DateTime(
+                $notification['read_at'],
+                new DateTimeZone('UTC')
+            );
+
+            $notification['read_at'] =
+                $date->format('Y-m-d\TH:i:s\Z');
+        }
     }
 
     unset($notification);

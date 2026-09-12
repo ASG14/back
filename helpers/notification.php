@@ -3,6 +3,7 @@
 function createNotification(
     PDO $pdo,
     int $userId,
+    int $actorUserId,
     string $type,
     string $title,
     string $message,
@@ -12,17 +13,19 @@ function createNotification(
     $stmt = $pdo->prepare("
         INSERT INTO notifications (
             user_id,
+            actor_user_id,
             type,
             title,
             message,
             group_id,
             order_id
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     ");
 
     $stmt->execute([
         $userId,
+        $actorUserId,
         $type,
         $title,
         $message,
