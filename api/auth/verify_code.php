@@ -22,7 +22,7 @@ $phone = trim($_POST['phone'] ?? '');
 $code = trim($_POST['code'] ?? '');
 
 /*
- * Validate required fields
+ * Validate required fields.
  */
 $errors = validateRequired([
     'phone' => $phone,
@@ -34,7 +34,7 @@ if (!empty($errors)) {
 }
 
 /*
- * Validate phone
+ * Validate phone.
  */
 if (!validatePhone($phone)) {
     validationError([
@@ -43,7 +43,7 @@ if (!validatePhone($phone)) {
 }
 
 /*
- * Validate OTP
+ * Validate OTP format.
  */
 if (!validateVerificationCode($code)) {
     validationError([
@@ -54,7 +54,15 @@ if (!validateVerificationCode($code)) {
 try {
 
     /*
-     * Get latest OTP for this phone.
+     * Start transaction before reading the OTP.
+     *
+     * FOR UPDATE prevents two concurrent verification
+     * requests from consuming the same OTP.
+     */
+    $pdo->beginTransaction();
+
+    /*
+     * Get the latest unused OTP and lock its row.
      */
     $stmt = $pdo->prepare("
         SELECT
@@ -62,11 +70,14 @@ try {
             phone,
             code,
             attempts,
-            expires_at
+            expires_at,
+            used_at
         FROM otp_codes
         WHERE phone = :phone
+          AND used_at IS NULL
         ORDER BY created_at DESC
         LIMIT 1
+        FOR UPDATE
     ");
 
     $stmt->execute([
@@ -76,6 +87,9 @@ try {
     $otp = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$otp) {
+
+        $pdo->rollBack();
+
         http_response_code(400);
 
         echo json_encode([
@@ -90,6 +104,19 @@ try {
      * Check expiration.
      */
     if (strtotime($otp['expires_at']) <= time()) {
+
+        $stmt = $pdo->prepare("
+            UPDATE otp_codes
+            SET used_at = NOW()
+            WHERE id = :id
+        ");
+
+        $stmt->execute([
+            'id' => $otp['id']
+        ]);
+
+        $pdo->commit();
+
         http_response_code(400);
 
         echo json_encode([
@@ -104,6 +131,9 @@ try {
      * Maximum 5 attempts.
      */
     if ((int) $otp['attempts'] >= 5) {
+
+        $pdo->rollBack();
+
         http_response_code(429);
 
         echo json_encode([
@@ -115,13 +145,13 @@ try {
     }
 
     /*
-     * Check code.
+     * Verify OTP against its password hash.
      */
-    if (!hash_equals(
-        (string) $otp['code'],
-        (string) $code
-    )) {
+    if (!password_verify($code, $otp['code'])) {
 
+        /*
+         * Increment failed attempts while the row is locked.
+         */
         $stmt = $pdo->prepare("
             UPDATE otp_codes
             SET attempts = attempts + 1
@@ -132,10 +162,14 @@ try {
             'id' => $otp['id']
         ]);
 
+        $currentAttempts = (int) $otp['attempts'] + 1;
+
         $remainingAttempts = max(
             0,
-            4 - (int) $otp['attempts']
+            5 - $currentAttempts
         );
+
+        $pdo->commit();
 
         http_response_code(400);
 
@@ -150,8 +184,18 @@ try {
 
     /*
      * OTP is correct.
+     *
+     * Mark it as used before creating the session.
      */
-    $pdo->beginTransaction();
+    $stmt = $pdo->prepare("
+        UPDATE otp_codes
+        SET used_at = NOW()
+        WHERE id = :id
+    ");
+
+    $stmt->execute([
+        'id' => $otp['id']
+    ]);
 
     /*
      * Find existing user.
@@ -210,6 +254,9 @@ try {
      */
     $token = bin2hex(random_bytes(32));
 
+    /*
+     * Token validity: 30 days.
+     */
     $expiresAt = date(
         'Y-m-d H:i:s',
         time() + (60 * 60 * 24 * 30)
@@ -218,6 +265,11 @@ try {
     /*
      * Store only the SHA-256 hash of the token.
      */
+    $tokenHash = hash(
+        'sha256',
+        $token
+    );
+
     $stmt = $pdo->prepare("
         INSERT INTO user_tokens (
             user_id,
@@ -233,20 +285,22 @@ try {
 
     $stmt->execute([
         'user_id' => $userId,
-        'token' => hash('sha256', $token),
+        'token' => $tokenHash,
         'expires_at' => $expiresAt
     ]);
 
     /*
-     * Delete used OTP.
+     * Clean up expired authentication tokens
+     * belonging to this user.
      */
     $stmt = $pdo->prepare("
-        DELETE FROM otp_codes
-        WHERE id = :id
+        DELETE FROM user_tokens
+        WHERE user_id = :user_id
+          AND expires_at <= NOW()
     ");
 
     $stmt->execute([
-        'id' => $otp['id']
+        'user_id' => $userId
     ]);
 
     $pdo->commit();
@@ -272,6 +326,10 @@ try {
         $pdo->rollBack();
     }
 
+    error_log(
+        'OTP verification database error: ' . $e->getMessage()
+    );
+
     http_response_code(500);
 
     echo json_encode([
@@ -284,6 +342,10 @@ try {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
     }
+
+    error_log(
+        'OTP verification error: ' . $e->getMessage()
+    );
 
     http_response_code(500);
 

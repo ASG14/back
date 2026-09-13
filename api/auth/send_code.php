@@ -25,6 +25,14 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $phone = trim($_POST['phone'] ?? '');
 
 /*
+ * Get client IP address.
+ *
+ * REMOTE_ADDR is intentionally used because forwarded
+ * headers can be spoofed unless a trusted proxy is configured.
+ */
+$ipAddress = $_SERVER['REMOTE_ADDR'] ?? '';
+
+/*
  * Validate required fields.
  */
 $errors = validateRequired([
@@ -59,17 +67,43 @@ if (!validatePhone($phone)) {
 try {
 
     /*
-     * Delete expired OTP codes.
+     * Cooldown:
+     * A new OTP request for the same phone number
+     * is allowed only after 60 seconds.
      */
     $stmt = $pdo->prepare("
-        DELETE FROM otp_codes
-        WHERE expires_at <= NOW()
+        SELECT created_at
+        FROM otp_codes
+        WHERE phone = :phone
+        ORDER BY created_at DESC
+        LIMIT 1
     ");
 
-    $stmt->execute();
+    $stmt->execute([
+        'phone' => $phone
+    ]);
+
+    $lastCreatedAt = $stmt->fetchColumn();
+
+    if ($lastCreatedAt !== false) {
+
+        $secondsSinceLastRequest =
+            time() - strtotime($lastCreatedAt);
+
+        if ($secondsSinceLastRequest < 60) {
+            http_response_code(429);
+
+            echo json_encode([
+                'success' => false,
+                'message' => 'Please wait before requesting another OTP.'
+            ], JSON_UNESCAPED_UNICODE);
+
+            exit;
+        }
+    }
 
     /*
-     * Rate limit:
+     * Phone rate limit:
      * Maximum 3 OTP requests within 10 minutes
      * for the same phone number.
      */
@@ -87,9 +121,41 @@ try {
         'phone' => $phone
     ]);
 
-    $requestCount = (int) $stmt->fetchColumn();
+    $phoneRequestCount = (int) $stmt->fetchColumn();
 
-    if ($requestCount >= 3) {
+    if ($phoneRequestCount >= 3) {
+        http_response_code(429);
+
+        echo json_encode([
+            'success' => false,
+            'message' => 'Too many OTP requests. Please try again later.'
+        ], JSON_UNESCAPED_UNICODE);
+
+        exit;
+    }
+
+    /*
+     * IP rate limit:
+     * Maximum 10 OTP requests within 10 minutes
+     * from the same IP address.
+     */
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM otp_codes
+        WHERE ip_address = :ip_address
+          AND created_at >= DATE_SUB(
+              CURRENT_TIMESTAMP,
+              INTERVAL 10 MINUTE
+          )
+    ");
+
+    $stmt->execute([
+        'ip_address' => $ipAddress
+    ]);
+
+    $ipRequestCount = (int) $stmt->fetchColumn();
+
+    if ($ipRequestCount >= 10) {
         http_response_code(429);
 
         echo json_encode([
@@ -103,13 +169,30 @@ try {
     /*
      * Send OTP through SMS service.
      *
-     * The SMS provider generates the code
-     * and returns it to us.
+     * sendOtpSms() returns the actual OTP code.
      */
     $code = sendOtpSms($phone);
 
     if ($code === '') {
-        throw new Exception('SMS service did not return a verification code');
+        throw new Exception(
+            'SMS service did not return a verification code'
+        );
+    }
+
+    /*
+     * Hash OTP before storing it.
+     *
+     * The raw OTP is never stored in the database.
+     */
+    $codeHash = password_hash(
+        $code,
+        PASSWORD_DEFAULT
+    );
+
+    if ($codeHash === false) {
+        throw new Exception(
+            'Unable to securely hash verification code'
+        );
     }
 
     /*
@@ -121,28 +204,47 @@ try {
     );
 
     /*
-     * Store OTP.
+     * Store hashed OTP.
      */
     $stmt = $pdo->prepare("
         INSERT INTO otp_codes (
             phone,
+            ip_address,
             code,
             attempts,
-            expires_at
+            expires_at,
+            used_at
         )
         VALUES (
             :phone,
+            :ip_address,
             :code,
             0,
-            :expires_at
+            :expires_at,
+            NULL
         )
     ");
 
     $stmt->execute([
         'phone' => $phone,
-        'code' => $code,
+        'ip_address' => $ipAddress,
+        'code' => $codeHash,
         'expires_at' => $expiresAt
     ]);
+
+    /*
+     * Delete expired OTP records only after
+     * successful creation of the new OTP.
+     *
+     * This does not affect the rate-limit checks above.
+     */
+    $stmt = $pdo->prepare("
+        DELETE FROM otp_codes
+        WHERE expires_at <= NOW()
+          AND used_at IS NULL
+    ");
+
+    $stmt->execute();
 
     echo json_encode([
         'success' => true,
@@ -172,6 +274,6 @@ try {
 
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => 'Unable to send OTP. Please try again later.'
     ], JSON_UNESCAPED_UNICODE);
 }

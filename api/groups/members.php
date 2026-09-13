@@ -61,12 +61,10 @@ try {
         exit;
     }
 
-    // دریافت اعضای گروه
+    // دریافت حداقل اطلاعات مورد نیاز اعضای گروه
     $stmt = $pdo->prepare("
         SELECT
             u.id,
-            gm.group_id,
-            u.phone,
             u.first_name,
             u.last_name,
             CASE
