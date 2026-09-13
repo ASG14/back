@@ -56,25 +56,29 @@ try {
 
 } catch (PDOException $e) {
 
-    // فقط برای دیباگ موقت
+    error_log(
+        'groups/list.php PDO Error: ' . $e->getMessage()
+    );
+
     http_response_code(500);
 
     echo json_encode([
         'success' => false,
-        'message' => 'PDO ERROR',
-        'error' => $e->getMessage(),
+        'message' => 'Server error',
         'data' => []
     ], JSON_UNESCAPED_UNICODE);
 
 } catch (Throwable $e) {
 
-    // خطاهای غیر PDO
+    error_log(
+        'groups/list.php Error: ' . $e->getMessage()
+    );
+
     http_response_code(500);
 
     echo json_encode([
         'success' => false,
-        'message' => 'PHP ERROR',
-        'error' => $e->getMessage(),
+        'message' => 'Server error',
         'data' => []
     ], JSON_UNESCAPED_UNICODE);
 }
