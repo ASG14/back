@@ -19,50 +19,53 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 /*
- * Get Authorization header
+ * Get token from Authorization header first.
+ * If it does not exist, use Web authentication cookie.
  */
+$token = null;
+
 $headers = getallheaders();
 
 $authorization = $headers['Authorization']
     ?? $headers['authorization']
     ?? '';
 
-if ($authorization === '') {
+if ($authorization !== '') {
 
-    http_response_code(401);
-
-    echo json_encode([
-        'success' => false,
-        'message' => 'Authorization token is required'
-    ], JSON_UNESCAPED_UNICODE);
-
-    exit;
+    if (preg_match('/Bearer\s+(.+)/i', $authorization, $matches)) {
+        $token = trim($matches[1]);
+    }
 }
 
 /*
- * Extract Bearer token
+ * Flutter Web fallback.
  */
-if (!preg_match('/Bearer\s+(.+)/i', $authorization, $matches)) {
-
-    http_response_code(401);
-
-    echo json_encode([
-        'success' => false,
-        'message' => 'Invalid authorization header'
-    ], JSON_UNESCAPED_UNICODE);
-
-    exit;
+if (($token === null || $token === '') && !empty($_COOKIE['auth_token'])) {
+    $token = $_COOKIE['auth_token'];
 }
 
-$token = trim($matches[1]);
+if ($token === null || $token === '') {
 
-if ($token === '') {
-
-    http_response_code(401);
+    /*
+     * Even if there is no token, clear the cookie.
+     */
+    setcookie(
+        'auth_token',
+        '',
+        [
+            'expires' => time() - 3600,
+            'path' => '/',
+            'secure' => true,
+            'httponly' => true,
+            'samesite' => 'Lax'
+        ]
+    );
 
     echo json_encode([
-        'success' => false,
-        'message' => 'Invalid token'
+        'success' => true,
+        'data' => [
+            'message' => 'Logged out successfully'
+        ]
     ], JSON_UNESCAPED_UNICODE);
 
     exit;
@@ -70,16 +73,11 @@ if ($token === '') {
 
 try {
 
-    /*
-     * Hash token before deleting it.
-     *
-     * login.php stores SHA-256(token) in the database.
-     */
-    $hashedToken = hash('sha256', $token);
+    $hashedToken = hash(
+        'sha256',
+        $token
+    );
 
-    /*
-     * Delete token
-     */
     $stmt = $pdo->prepare("
         DELETE FROM user_tokens
         WHERE token = :token
@@ -89,6 +87,21 @@ try {
         'token' => $hashedToken
     ]);
 
+    /*
+     * Clear Web authentication cookie.
+     */
+    setcookie(
+        'auth_token',
+        '',
+        [
+            'expires' => time() - 3600,
+            'path' => '/',
+            'secure' => true,
+            'httponly' => true,
+            'samesite' => 'Lax'
+        ]
+    );
+
     echo json_encode([
         'success' => true,
         'data' => [
@@ -97,6 +110,10 @@ try {
     ], JSON_UNESCAPED_UNICODE);
 
 } catch (PDOException $e) {
+
+    error_log(
+        'Logout database error: ' . $e->getMessage()
+    );
 
     http_response_code(500);
 

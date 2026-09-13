@@ -8,6 +8,7 @@ require_once '../../helpers/validation.php';
 header('Content-Type: application/json; charset=utf-8');
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+
     http_response_code(405);
 
     echo json_encode([
@@ -21,9 +22,6 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 $phone = trim($_POST['phone'] ?? '');
 $code = trim($_POST['code'] ?? '');
 
-/*
- * Validate required fields.
- */
 $errors = validateRequired([
     'phone' => $phone,
     'code' => $code
@@ -33,18 +31,12 @@ if (!empty($errors)) {
     validationError($errors);
 }
 
-/*
- * Validate phone.
- */
 if (!validatePhone($phone)) {
     validationError([
         'phone' => 'Invalid phone number'
     ]);
 }
 
-/*
- * Validate OTP format.
- */
 if (!validateVerificationCode($code)) {
     validationError([
         'code' => 'Invalid verification code'
@@ -53,17 +45,8 @@ if (!validateVerificationCode($code)) {
 
 try {
 
-    /*
-     * Start transaction before reading the OTP.
-     *
-     * FOR UPDATE prevents two concurrent verification
-     * requests from consuming the same OTP.
-     */
     $pdo->beginTransaction();
 
-    /*
-     * Get the latest unused OTP and lock its row.
-     */
     $stmt = $pdo->prepare("
         SELECT
             id,
@@ -100,9 +83,6 @@ try {
         exit;
     }
 
-    /*
-     * Check expiration.
-     */
     if (strtotime($otp['expires_at']) <= time()) {
 
         $stmt = $pdo->prepare("
@@ -127,9 +107,6 @@ try {
         exit;
     }
 
-    /*
-     * Maximum 5 attempts.
-     */
     if ((int) $otp['attempts'] >= 5) {
 
         $pdo->rollBack();
@@ -144,14 +121,8 @@ try {
         exit;
     }
 
-    /*
-     * Verify OTP against its password hash.
-     */
     if (!password_verify($code, $otp['code'])) {
 
-        /*
-         * Increment failed attempts while the row is locked.
-         */
         $stmt = $pdo->prepare("
             UPDATE otp_codes
             SET attempts = attempts + 1
@@ -183,9 +154,7 @@ try {
     }
 
     /*
-     * OTP is correct.
-     *
-     * Mark it as used before creating the session.
+     * Mark OTP as used.
      */
     $stmt = $pdo->prepare("
         UPDATE otp_codes
@@ -198,7 +167,7 @@ try {
     ]);
 
     /*
-     * Find existing user.
+     * Find user.
      */
     $stmt = $pdo->prepare("
         SELECT
@@ -218,7 +187,7 @@ try {
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
     /*
-     * Create user if it does not exist.
+     * Create user if necessary.
      */
     if (!$user) {
 
@@ -250,7 +219,7 @@ try {
     }
 
     /*
-     * Generate authentication token.
+     * Generate secure authentication token.
      */
     $token = bin2hex(random_bytes(32));
 
@@ -263,7 +232,7 @@ try {
     );
 
     /*
-     * Store only the SHA-256 hash of the token.
+     * Store only token hash in database.
      */
     $tokenHash = hash(
         'sha256',
@@ -290,8 +259,7 @@ try {
     ]);
 
     /*
-     * Clean up expired authentication tokens
-     * belonging to this user.
+     * Remove expired tokens for this user.
      */
     $stmt = $pdo->prepare("
         DELETE FROM user_tokens
@@ -305,10 +273,44 @@ try {
 
     $pdo->commit();
 
+    /*
+     * --------------------------------------------------
+     * Flutter Web authentication cookie
+     * --------------------------------------------------
+     *
+     * HttpOnly:
+     * JavaScript cannot read the token.
+     *
+     * Secure:
+     * Cookie is sent only over HTTPS.
+     *
+     * SameSite:
+     * Prevents cross-site cookie sending.
+     *
+     * Path:
+     * Cookie is available to the API.
+     */
+    setcookie(
+        'auth_token',
+        $token,
+        [
+            'expires' => time() + (60 * 60 * 24 * 30),
+            'path' => '/',
+            'secure' => true,
+            'httponly' => true,
+            'samesite' => 'Lax'
+        ]
+    );
+
     echo json_encode([
         'success' => true,
         'message' => 'Verification successful',
         'data' => [
+            /*
+             * Keep token in response for mobile applications.
+             *
+             * Flutter Web will use the HttpOnly cookie instead.
+             */
             'token' => $token,
             'expires_at' => $expiresAt,
             'user' => [

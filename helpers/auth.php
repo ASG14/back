@@ -8,15 +8,25 @@ function getAuthorizationToken(): ?string
         ?? $headers['authorization']
         ?? '';
 
-    if ($authorization === '') {
-        return null;
+    if ($authorization !== '') {
+        if (preg_match('/Bearer\s+(.+)/i', $authorization, $matches)) {
+            $token = trim($matches[1]);
+
+            if ($token !== '') {
+                return $token;
+            }
+        }
     }
 
-    if (!preg_match('/Bearer\s+(.+)/i', $authorization, $matches)) {
-        return null;
+    /*
+     * Flutter Web:
+     * Authentication token is stored in an HttpOnly cookie.
+     */
+    if (!empty($_COOKIE['auth_token'])) {
+        return $_COOKIE['auth_token'];
     }
 
-    return trim($matches[1]);
+    return null;
 }
 
 function requireAuth(PDO $pdo): array
@@ -73,6 +83,10 @@ function requireAuth(PDO $pdo): array
         return $user;
 
     } catch (PDOException $e) {
+
+        error_log(
+            'Authentication database error: ' . $e->getMessage()
+        );
 
         http_response_code(500);
 
