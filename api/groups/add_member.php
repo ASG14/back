@@ -74,7 +74,7 @@ try {
         SELECT
             id,
             title
-        FROM groups
+        FROM `groups`
         WHERE id = :group_id
           AND creator_id = :user_id
         LIMIT 1
@@ -151,7 +151,7 @@ try {
         'user_id' => $memberId
     ]);
 
-    if ($stmt->fetch()) {
+    if ($stmt->fetchColumn()) {
         $pdo->rollBack();
 
         http_response_code(409);
@@ -186,11 +186,14 @@ try {
     ]);
 
     /*
-     * Notify the new member
+     * Notify new member
+     *
+     * actor_user_id = group creator
      */
     createNotification(
         $pdo,
         $memberId,
+        $userId,
         'member_added',
         'به گروه اضافه شدید',
         "شما به گروه «{$group['title']}» اضافه شدید.",
@@ -199,13 +202,13 @@ try {
     );
 
     /*
-     * Notify existing members except the new member
+     * Notify existing members
      */
     $stmt = $pdo->prepare("
         SELECT user_id
         FROM group_members
         WHERE group_id = :group_id
-          AND user_id != :member_id
+          AND user_id <> :member_id
     ");
 
     $stmt->execute([
@@ -225,9 +228,11 @@ try {
     }
 
     foreach ($members as $existingMemberId) {
+
         createNotification(
             $pdo,
             (int) $existingMemberId,
+            $userId,
             'member_joined',
             'عضو جدید',
             "{$memberName} به گروه «{$group['title']}» اضافه شد.",

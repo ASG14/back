@@ -72,12 +72,14 @@ try {
      * Only group creator can remove members
      */
     $stmt = $pdo->prepare("
-    SELECT id, title
-    FROM `groups`
-    WHERE id = :group_id
-      AND creator_id = :user_id
-    LIMIT 1
-");
+        SELECT
+            id,
+            title
+        FROM `groups`
+        WHERE id = :group_id
+          AND creator_id = :user_id
+        LIMIT 1
+    ");
 
     $stmt->execute([
         'group_id' => $groupId,
@@ -116,7 +118,7 @@ try {
     }
 
     /*
-     * Find member before deleting
+     * Get member information before deletion
      */
     $stmt = $pdo->prepare("
         SELECT
@@ -124,8 +126,8 @@ try {
             u.phone,
             u.first_name,
             u.last_name
-        FROM group_members gm
-        INNER JOIN users u
+        FROM group_members AS gm
+        INNER JOIN users AS u
             ON u.id = gm.user_id
         WHERE gm.group_id = :group_id
           AND gm.user_id = :member_id
@@ -153,21 +155,14 @@ try {
     }
 
     /*
-     * Find ACTIVE assignments of the member.
-     *
-     * Active assignment means:
-     * - not completed
-     * - not cancelled
-     *
-     * Cancelled and completed assignments are historical
-     * records and must remain untouched.
+     * Find active assignments
      */
     $stmt = $pdo->prepare("
-        SELECT DISTINCT
+        SELECT
             oa.id,
             oa.order_id
-        FROM order_assignments oa
-        INNER JOIN orders o
+        FROM order_assignments AS oa
+        INNER JOIN orders AS o
             ON o.id = oa.order_id
         WHERE o.group_id = :group_id
           AND oa.user_id = :member_id
@@ -184,14 +179,12 @@ try {
     $activeAssignments = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     /*
-     * Cancel active assignments instead of deleting them.
-     *
-     * This preserves assignment history.
+     * Cancel active assignments
      */
     if (!empty($activeAssignments)) {
 
         $assignmentIds = array_map(
-            fn($assignment) => (int) $assignment['id'],
+            static fn($assignment) => (int) $assignment['id'],
             $activeAssignments
         );
 
@@ -211,45 +204,48 @@ try {
         $stmt->execute($assignmentIds);
 
         /*
-         * Return affected reserved orders to pending.
+         * Return affected orders to pending
          */
-        $orderIds = array_map(
-            fn($assignment) => (int) $assignment['order_id'],
+        $orderIds = array_values(array_unique(array_map(
+            static fn($assignment) => (int) $assignment['order_id'],
             $activeAssignments
-        );
+        )));
 
-        $orderPlaceholders = implode(
-            ',',
-            array_fill(0, count($orderIds), '?')
-        );
+        if (!empty($orderIds)) {
 
-        $params = array_merge(
-            [$groupId],
-            $orderIds
-        );
+            $orderPlaceholders = implode(
+                ',',
+                array_fill(0, count($orderIds), '?')
+            );
 
-        $stmt = $pdo->prepare("
-            UPDATE orders
-            SET
-                status = 'pending',
-                updated_at = CURRENT_TIMESTAMP
-            WHERE group_id = ?
-              AND status = 'reserved'
-              AND id IN ($orderPlaceholders)
-        ");
+            $params = array_merge(
+                [$groupId],
+                $orderIds
+            );
 
-        $stmt->execute($params);
+            $stmt = $pdo->prepare("
+                UPDATE orders
+                SET
+                    status = 'pending',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE group_id = ?
+                  AND status = 'reserved'
+                  AND id IN ($orderPlaceholders)
+            ");
+
+            $stmt->execute($params);
+        }
     }
 
     /*
-     * Find orders created by the removed member
+     * Find non-completed orders created by removed member
      */
     $stmt = $pdo->prepare("
-        SELECT
-            id
+        SELECT id
         FROM orders
         WHERE group_id = :group_id
           AND created_by = :member_id
+          AND status <> 'completed'
     ");
 
     $stmt->execute([
@@ -257,16 +253,13 @@ try {
         'member_id' => $memberId
     ]);
 
-    $createdOrderIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $createdOrderIds = array_map(
+        'intval',
+        $stmt->fetchAll(PDO::FETCH_COLUMN)
+    );
 
     /*
-     * Delete orders created by the removed member.
-     *
-     * order_assignments:
-     * ON DELETE CASCADE
-     *
-     * notifications.order_id:
-     * ON DELETE SET NULL
+     * Delete non-completed orders
      */
     if (!empty($createdOrderIds)) {
 
@@ -277,20 +270,21 @@ try {
 
         $params = array_merge(
             [$groupId],
-            array_map('intval', $createdOrderIds)
+            $createdOrderIds
         );
 
         $stmt = $pdo->prepare("
             DELETE FROM orders
             WHERE group_id = ?
               AND id IN ($placeholders)
+              AND status <> 'completed'
         ");
 
         $stmt->execute($params);
     }
 
     /*
-     * Remove member from group
+     * Remove member
      */
     $stmt = $pdo->prepare("
         DELETE FROM group_members
@@ -305,10 +299,13 @@ try {
 
     /*
      * Notify removed member
+     *
+     * actor_user_id = group creator
      */
     createNotification(
         $pdo,
         $memberId,
+        $userId,
         'member_removed',
         'از گروه حذف شدید',
         "شما از گروه «{$group['title']}» حذف شدید.",
@@ -345,6 +342,7 @@ try {
         createNotification(
             $pdo,
             (int) $remainingMemberId,
+            $userId,
             'member_removed',
             'عضو از گروه حذف شد',
             "{$memberName} از گروه «{$group['title']}» حذف شد.",
@@ -372,7 +370,6 @@ try {
 
     echo json_encode([
         'success' => false,
-        'message' => $e->getMessage()
+        'message' => 'Server error'
     ], JSON_UNESCAPED_UNICODE);
 }
-

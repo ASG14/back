@@ -146,7 +146,7 @@ try {
 
     echo json_encode([
         'success' => true,
-        'message' => 'Verification code sent successfully'
+        'message' => 'کد ورود برای شما پیامک شد'
     ], JSON_UNESCAPED_UNICODE);
 
 } catch (PDOException $e) {
@@ -172,6 +172,6 @@ try {
 
     echo json_encode([
         'success' => false,
-        'message' => 'Unable to send verification code'
+        'message' => $e->getMessage()
     ], JSON_UNESCAPED_UNICODE);
 }

@@ -20,16 +20,24 @@ function createNotification(
             group_id,
             order_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            :user_id,
+            :actor_user_id,
+            :type,
+            :title,
+            :message,
+            :group_id,
+            :order_id
+        )
     ");
 
     $stmt->execute([
-        $userId,
-        $actorUserId,
-        $type,
-        $title,
-        $message,
-        $groupId,
-        $orderId,
+        'user_id' => $userId,
+        'actor_user_id' => $actorUserId,
+        'type' => $type,
+        'title' => $title,
+        'message' => $message,
+        'group_id' => $groupId,
+        'order_id' => $orderId,
     ]);
 }

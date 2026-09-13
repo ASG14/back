@@ -19,8 +19,19 @@ try {
     }
 
     $user = requireAuth($pdo);
+
     $userId = (int) $user['id'];
 
+    /*
+     * The application stores timestamps in Tehran time.
+     * Convert them explicitly to UTC before sending to Flutter.
+     */
+    $timezone = new DateTimeZone('Asia/Tehran');
+    $utc = new DateTimeZone('UTC');
+
+    /*
+     * Get notifications
+     */
     $stmt = $pdo->prepare("
         SELECT
             n.id,
@@ -31,16 +42,23 @@ try {
             n.group_id,
             n.order_id,
 
-            CONCAT(
-                COALESCE(actor.first_name, ''),
-                CASE
-                    WHEN actor.first_name IS NOT NULL
-                     AND actor.last_name IS NOT NULL
-                    THEN ' '
-                    ELSE ''
-                END,
-                COALESCE(actor.last_name, '')
-            ) AS actor_name,
+            CASE
+                WHEN n.actor_user_id IS NULL THEN NULL
+                WHEN TRIM(
+                    CONCAT_WS(
+                        ' ',
+                        NULLIF(TRIM(actor.first_name), ''),
+                        NULLIF(TRIM(actor.last_name), '')
+                    )
+                ) = '' THEN CONCAT('کاربر ', actor.id)
+                ELSE TRIM(
+                    CONCAT_WS(
+                        ' ',
+                        NULLIF(TRIM(actor.first_name), ''),
+                        NULLIF(TRIM(actor.last_name), '')
+                    )
+                )
+            END AS actor_name,
 
             g.title AS group_title,
             o.title AS order_title,
@@ -49,41 +67,49 @@ try {
             n.created_at,
             n.read_at
 
-        FROM notifications n
+        FROM notifications AS n
 
-        LEFT JOIN users actor
+        LEFT JOIN users AS actor
             ON actor.id = n.actor_user_id
 
-        LEFT JOIN `groups` g
+        LEFT JOIN `groups` AS g
             ON g.id = n.group_id
 
-        LEFT JOIN orders o
+        LEFT JOIN orders AS o
             ON o.id = n.order_id
 
-        WHERE n.user_id = ?
+        WHERE n.user_id = :user_id
 
-        ORDER BY n.created_at DESC, n.id DESC
+        ORDER BY
+            n.created_at DESC,
+            n.id DESC
     ");
 
     $stmt->execute([
-        $userId,
+        'user_id' => $userId
     ]);
 
     $notifications = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
+    /*
+     * Get unread count
+     */
     $unreadStmt = $pdo->prepare("
         SELECT COUNT(*)
         FROM notifications
-        WHERE user_id = ?
+        WHERE user_id = :user_id
           AND is_read = 0
     ");
 
     $unreadStmt->execute([
-        $userId,
+        'user_id' => $userId
     ]);
 
     $unreadCount = (int) $unreadStmt->fetchColumn();
 
+    /*
+     * Normalize response
+     */
     foreach ($notifications as &$notification) {
 
         $notification['id'] = (int) $notification['id'];
@@ -107,24 +133,32 @@ try {
             (bool) $notification['is_read'];
 
         /*
-         * MySQL timestamp را به ISO 8601 UTC تبدیل می‌کنیم
-         * تا Flutter بتواند آن را بدون ابهام به زمان محلی تبدیل کند.
+         * created_at
          */
         if (!empty($notification['created_at'])) {
+
             $date = new DateTime(
                 $notification['created_at'],
-                new DateTimeZone('UTC')
+                $timezone
             );
+
+            $date->setTimezone($utc);
 
             $notification['created_at'] =
                 $date->format('Y-m-d\TH:i:s\Z');
         }
 
+        /*
+         * read_at
+         */
         if (!empty($notification['read_at'])) {
+
             $date = new DateTime(
                 $notification['read_at'],
-                new DateTimeZone('UTC')
+                $timezone
             );
+
+            $date->setTimezone($utc);
 
             $notification['read_at'] =
                 $date->format('Y-m-d\TH:i:s\Z');

@@ -77,9 +77,16 @@ if (!in_array($priority, ['low', 'medium', 'high'], true)) {
 }
 
 if ($deadline !== null && $deadline !== '') {
-    $date = DateTime::createFromFormat('Y-m-d H:i:s', $deadline);
+    $date = DateTime::createFromFormat(
+        'Y-m-d H:i:s',
+        $deadline,
+        new DateTimeZone('Asia/Tehran')
+    );
 
-    if (!$date || $date->format('Y-m-d H:i:s') !== $deadline) {
+    if (
+        !$date ||
+        $date->format('Y-m-d H:i:s') !== $deadline
+    ) {
         validationError([
             'deadline' => 'Invalid deadline format'
         ]);
@@ -110,7 +117,7 @@ try {
         'user_id' => $userId
     ]);
 
-    if (!$stmt->fetch()) {
+    if (!$stmt->fetchColumn()) {
         $pdo->rollBack();
 
         http_response_code(403);
@@ -157,7 +164,7 @@ try {
     $orderId = (int) $pdo->lastInsertId();
 
     /*
-     * Get order
+     * Get created order
      */
     $stmt = $pdo->prepare("
         SELECT
@@ -172,12 +179,12 @@ try {
             created_at,
             updated_at
         FROM orders
-        WHERE id = :id
+        WHERE id = :order_id
         LIMIT 1
     ");
 
     $stmt->execute([
-        'id' => $orderId
+        'order_id' => $orderId
     ]);
 
     $order = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -189,7 +196,7 @@ try {
         SELECT user_id
         FROM group_members
         WHERE group_id = :group_id
-          AND user_id != :user_id
+          AND user_id <> :user_id
     ");
 
     $stmt->execute([
@@ -201,11 +208,14 @@ try {
 
     /*
      * Create notifications
+     *
+     * actor_user_id = creator
      */
     foreach ($members as $memberId) {
         createNotification(
             $pdo,
             (int) $memberId,
+            $userId,
             'order_created',
             'سفارش جدید',
             "سفارش «{$title}» به گروه اضافه شد.",

@@ -52,7 +52,7 @@ try {
     $pdo->beginTransaction();
 
     /*
-     * Find the group and current user's membership.
+     * Find group and current user's membership
      */
     $stmt = $pdo->prepare("
         SELECT
@@ -89,8 +89,7 @@ try {
     }
 
     /*
-     * Owner cannot leave the group.
-     * The owner must delete the entire group instead.
+     * Owner cannot leave
      */
     if (
         $membership['role'] === 'owner' ||
@@ -109,13 +108,10 @@ try {
     }
 
     /*
-     * Find active assignments of the member.
-     *
-     * Only assignments that are currently active are affected.
-     * Completed and previously cancelled assignments remain as history.
+     * Find active assignments
      */
     $stmt = $pdo->prepare("
-        SELECT DISTINCT
+        SELECT
             oa.id,
             oa.order_id
         FROM order_assignments AS oa
@@ -144,9 +140,7 @@ try {
     }
 
     /*
-     * Cancel active assignments instead of deleting them.
-     *
-     * This preserves assignment history.
+     * Cancel active assignments
      */
     if (!empty($assignmentIds)) {
 
@@ -167,7 +161,7 @@ try {
     }
 
     /*
-     * Return affected reserved orders to pending.
+     * Return affected orders to pending
      */
     if (!empty($assignedOrderIds)) {
 
@@ -182,7 +176,7 @@ try {
 
         $params = array_merge(
             [$groupId],
-            array_map('intval', $assignedOrderIds)
+            $assignedOrderIds
         );
 
         $stmt = $pdo->prepare("
@@ -199,13 +193,10 @@ try {
     }
 
     /*
-     * Find orders created by the member that are not completed.
-     *
-     * Completed orders are historical records and must remain.
+     * Find non-completed orders created by leaving member
      */
     $stmt = $pdo->prepare("
-        SELECT
-            id
+        SELECT id
         FROM orders
         WHERE group_id = :group_id
           AND created_by = :user_id
@@ -217,16 +208,13 @@ try {
         'user_id' => $userId
     ]);
 
-    $createdOrderIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    $createdOrderIds = array_map(
+        'intval',
+        $stmt->fetchAll(PDO::FETCH_COLUMN)
+    );
 
     /*
-     * Delete active/non-completed orders created by the member.
-     *
-     * Related order_assignments are deleted automatically
-     * because of ON DELETE CASCADE.
-     *
-     * Notifications remain with order_id = NULL because
-     * notifications.order_id uses ON DELETE SET NULL.
+     * Delete non-completed orders
      */
     if (!empty($createdOrderIds)) {
 
@@ -237,7 +225,7 @@ try {
 
         $params = array_merge(
             [$groupId],
-            array_map('intval', $createdOrderIds)
+            $createdOrderIds
         );
 
         $stmt = $pdo->prepare("
@@ -251,7 +239,7 @@ try {
     }
 
     /*
-     * Remove member from the group.
+     * Remove member from group
      */
     $stmt = $pdo->prepare("
         DELETE FROM group_members
@@ -265,19 +253,7 @@ try {
     ]);
 
     /*
-     * Prepare member name for notification.
-     */
-    $memberName = trim(
-        ($user['first_name'] ?? '') . ' ' .
-        ($user['last_name'] ?? '')
-    );
-
-    if ($memberName === '') {
-        $memberName = 'یک کاربر';
-    }
-
-    /*
-     * Find remaining members.
+     * Find remaining members
      */
     $stmt = $pdo->prepare("
         SELECT user_id
@@ -292,13 +268,28 @@ try {
     $remainingMembers = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
     /*
-     * Notify remaining members.
+     * Prepare actor name
+     */
+    $memberName = trim(
+        ($user['first_name'] ?? '') . ' ' .
+        ($user['last_name'] ?? '')
+    );
+
+    if ($memberName === '') {
+        $memberName = 'یک کاربر';
+    }
+
+    /*
+     * Notify remaining members
+     *
+     * actor_user_id = user who left
      */
     foreach ($remainingMembers as $remainingMemberId) {
 
         createNotification(
             $pdo,
             (int) $remainingMemberId,
+            $userId,
             'member_left',
             'عضو از گروه خارج شد',
             "{$memberName} از گروه «{$membership['title']}» خارج شد.",

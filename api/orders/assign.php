@@ -9,47 +9,22 @@ require_once '../../helpers/notification.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
-/*
-|--------------------------------------------------------------------------
-| Check HTTP Method
-|--------------------------------------------------------------------------
-*/
-
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-
     http_response_code(405);
 
     echo json_encode([
         'success' => false,
         'message' => 'Method not allowed'
-    ]);
+    ], JSON_UNESCAPED_UNICODE);
 
     exit;
 }
-
-/*
-|--------------------------------------------------------------------------
-| Authentication
-|--------------------------------------------------------------------------
-*/
 
 $user = requireAuth($pdo);
 
 $userId = (int) $user['id'];
 
-/*
-|--------------------------------------------------------------------------
-| Get Input
-|--------------------------------------------------------------------------
-*/
-
 $orderId = $_POST['order_id'] ?? '';
-
-/*
-|--------------------------------------------------------------------------
-| Validation
-|--------------------------------------------------------------------------
-*/
 
 $errors = validateRequired([
     'order_id' => $orderId
@@ -60,7 +35,6 @@ if (!empty($errors)) {
 }
 
 if (!validateId($orderId)) {
-
     validationError([
         'order_id' => 'Invalid order ID'
     ]);
@@ -68,30 +42,23 @@ if (!validateId($orderId)) {
 
 $orderId = (int) $orderId;
 
-/*
-|--------------------------------------------------------------------------
-| Start Transaction
-|--------------------------------------------------------------------------
-*/
-
 try {
 
     $pdo->beginTransaction();
 
     /*
-    |--------------------------------------------------------------------------
-    | Lock the order row
-    |--------------------------------------------------------------------------
-    */
-
+     * Lock order
+     */
     $stmt = $pdo->prepare("
         SELECT
             id,
             group_id,
             created_by,
-            title
+            title,
+            status
         FROM orders
         WHERE id = :order_id
+        LIMIT 1
         FOR UPDATE
     ");
 
@@ -101,14 +68,7 @@ try {
 
     $order = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Check Order Exists
-    |--------------------------------------------------------------------------
-    */
-
     if (!$order) {
-
         $pdo->rollBack();
 
         http_response_code(404);
@@ -116,26 +76,22 @@ try {
         echo json_encode([
             'success' => false,
             'message' => 'Order not found'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
 
         exit;
     }
 
     $groupId = (int) $order['group_id'];
-    $createdBy = (int) $order['created_by'];
     $orderTitle = $order['title'];
 
     /*
-    |--------------------------------------------------------------------------
-    | Check User Is Group Member
-    |--------------------------------------------------------------------------
-    */
-
+     * Check membership
+     */
     $stmt = $pdo->prepare("
-        SELECT id
+        SELECT 1
         FROM group_members
         WHERE group_id = :group_id
-        AND user_id = :user_id
+          AND user_id = :user_id
         LIMIT 1
     ");
 
@@ -144,10 +100,7 @@ try {
         'user_id' => $userId
     ]);
 
-    $membership = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$membership) {
-
+    if (!$stmt->fetchColumn()) {
         $pdo->rollBack();
 
         http_response_code(403);
@@ -155,45 +108,36 @@ try {
         echo json_encode([
             'success' => false,
             'message' => 'You are not a member of this group'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
 
         exit;
     }
 
-   /*
-|--------------------------------------------------------------------------
-| Check Active Assignment
-|--------------------------------------------------------------------------
-*/
-
-$stmt = $pdo->prepare("
-    SELECT
-        id,
-        user_id,
-        assigned_at
-    FROM order_assignments
-    WHERE order_id = :order_id
-    AND completed_at IS NULL
-    AND cancelled_at IS NULL
-    LIMIT 1
-");
-
-$stmt->execute([
-    'order_id' => $orderId
-]);
-
-$activeAssignment = $stmt->fetch(PDO::FETCH_ASSOC);
-
     /*
-    |--------------------------------------------------------------------------
-    | Order Already Has An Active Assignment
-    |--------------------------------------------------------------------------
-    */
+     * Check active assignment
+     */
+    $stmt = $pdo->prepare("
+        SELECT
+            id,
+            user_id,
+            assigned_at
+        FROM order_assignments
+        WHERE order_id = :order_id
+          AND completed_at IS NULL
+          AND cancelled_at IS NULL
+        LIMIT 1
+        FOR UPDATE
+    ");
+
+    $stmt->execute([
+        'order_id' => $orderId
+    ]);
+
+    $activeAssignment = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if ($activeAssignment) {
 
         if ((int) $activeAssignment['user_id'] === $userId) {
-
             $pdo->rollBack();
 
             http_response_code(409);
@@ -201,7 +145,7 @@ $activeAssignment = $stmt->fetch(PDO::FETCH_ASSOC);
             echo json_encode([
                 'success' => false,
                 'message' => 'You are already responsible for this order'
-            ]);
+            ], JSON_UNESCAPED_UNICODE);
 
             exit;
         }
@@ -213,17 +157,14 @@ $activeAssignment = $stmt->fetch(PDO::FETCH_ASSOC);
         echo json_encode([
             'success' => false,
             'message' => 'This order is already assigned to another user'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
 
         exit;
     }
 
     /*
-    |--------------------------------------------------------------------------
-    | Create Assignment
-    |--------------------------------------------------------------------------
-    */
-
+     * Create assignment
+     */
     $stmt = $pdo->prepare("
         INSERT INTO order_assignments (
             order_id,
@@ -240,32 +181,33 @@ $activeAssignment = $stmt->fetch(PDO::FETCH_ASSOC);
         'user_id' => $userId
     ]);
 
-    $assignmentId = $pdo->lastInsertId();
+    $assignmentId = (int) $pdo->lastInsertId();
+
+    /*
+     * Update order
+     */
     $stmt = $pdo->prepare("
         UPDATE orders
-     SET
-        status = 'reserved',
-        updated_at = CURRENT_TIMESTAMP
+        SET
+            status = 'reserved',
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = :order_id
-");
+    ");
 
-$stmt->execute([
-    'order_id' => $orderId
-]);
+    $stmt->execute([
+        'order_id' => $orderId
+    ]);
+
     /*
-    |--------------------------------------------------------------------------
-    | Notify Group Members
-    |--------------------------------------------------------------------------
-    |
-    | The user who reserved the order does not receive a notification.
-    |
-    */
-
+     * Notify other members
+     *
+     * actor_user_id = user who accepted responsibility
+     */
     $stmt = $pdo->prepare("
         SELECT user_id
         FROM group_members
         WHERE group_id = :group_id
-          AND user_id != :user_id
+          AND user_id <> :user_id
     ");
 
     $stmt->execute([
@@ -276,30 +218,20 @@ $stmt->execute([
     $members = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
     foreach ($members as $memberId) {
+
         createNotification(
             $pdo,
             (int) $memberId,
-            'order_reserved',
-            'سفارش رزرو شد',
-            "سفارش «{$orderTitle}» توسط یکی از اعضای گروه رزرو شد.",
+            $userId,
+            'order_assigned',
+            'مسئولیت سفارش پذیرفته شد',
+            "مسئولیت سفارش «{$orderTitle}» به عهده گرفته شد.",
             $groupId,
             $orderId
         );
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Commit Transaction
-    |--------------------------------------------------------------------------
-    */
-
     $pdo->commit();
-
-    /*
-    |--------------------------------------------------------------------------
-    | Success Response
-    |--------------------------------------------------------------------------
-    */
 
     echo json_encode([
         'success' => true,
@@ -311,7 +243,7 @@ $stmt->execute([
                 'user_id' => $userId
             ]
         ]
-    ]);
+    ], JSON_UNESCAPED_UNICODE);
 
 } catch (PDOException $e) {
 
@@ -324,5 +256,5 @@ $stmt->execute([
     echo json_encode([
         'success' => false,
         'message' => 'Server error'
-    ]);
+    ], JSON_UNESCAPED_UNICODE);
 }

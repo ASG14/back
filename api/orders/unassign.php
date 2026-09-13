@@ -9,47 +9,22 @@ require_once '../../helpers/notification.php';
 
 header('Content-Type: application/json; charset=utf-8');
 
-/*
-|--------------------------------------------------------------------------
-| Check HTTP Method
-|--------------------------------------------------------------------------
-*/
-
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-
     http_response_code(405);
 
     echo json_encode([
         'success' => false,
         'message' => 'Method not allowed'
-    ]);
+    ], JSON_UNESCAPED_UNICODE);
 
     exit;
 }
-
-/*
-|--------------------------------------------------------------------------
-| Authentication
-|--------------------------------------------------------------------------
-*/
 
 $user = requireAuth($pdo);
 
 $userId = (int) $user['id'];
 
-/*
-|--------------------------------------------------------------------------
-| Get Input
-|--------------------------------------------------------------------------
-*/
-
 $orderId = $_POST['order_id'] ?? '';
-
-/*
-|--------------------------------------------------------------------------
-| Validation
-|--------------------------------------------------------------------------
-*/
 
 $errors = validateRequired([
     'order_id' => $orderId
@@ -60,7 +35,6 @@ if (!empty($errors)) {
 }
 
 if (!validateId($orderId)) {
-
     validationError([
         'order_id' => 'Invalid order ID'
     ]);
@@ -68,22 +42,13 @@ if (!validateId($orderId)) {
 
 $orderId = (int) $orderId;
 
-/*
-|--------------------------------------------------------------------------
-| Start Transaction
-|--------------------------------------------------------------------------
-*/
-
 try {
 
     $pdo->beginTransaction();
 
     /*
-    |--------------------------------------------------------------------------
-    | Lock Order
-    |--------------------------------------------------------------------------
-    */
-
+     * Lock order
+     */
     $stmt = $pdo->prepare("
         SELECT
             id,
@@ -92,6 +57,7 @@ try {
             status
         FROM orders
         WHERE id = :order_id
+        LIMIT 1
         FOR UPDATE
     ");
 
@@ -101,14 +67,7 @@ try {
 
     $order = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    /*
-    |--------------------------------------------------------------------------
-    | Check Order Exists
-    |--------------------------------------------------------------------------
-    */
-
     if (!$order) {
-
         $pdo->rollBack();
 
         http_response_code(404);
@@ -116,7 +75,7 @@ try {
         echo json_encode([
             'success' => false,
             'message' => 'Order not found'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
 
         exit;
     }
@@ -125,16 +84,13 @@ try {
     $orderTitle = $order['title'];
 
     /*
-    |--------------------------------------------------------------------------
-    | Check User Is Group Member
-    |--------------------------------------------------------------------------
-    */
-
+     * Check membership
+     */
     $stmt = $pdo->prepare("
-        SELECT id
+        SELECT 1
         FROM group_members
         WHERE group_id = :group_id
-        AND user_id = :user_id
+          AND user_id = :user_id
         LIMIT 1
     ");
 
@@ -143,10 +99,7 @@ try {
         'user_id' => $userId
     ]);
 
-    $membership = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$membership) {
-
+    if (!$stmt->fetchColumn()) {
         $pdo->rollBack();
 
         http_response_code(403);
@@ -154,22 +107,18 @@ try {
         echo json_encode([
             'success' => false,
             'message' => 'You are not a member of this group'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
 
         exit;
     }
 
     /*
-    |--------------------------------------------------------------------------
-    | Check Active Assignment
-    |--------------------------------------------------------------------------
-    */
-
+     * Find active assignment
+     */
     $stmt = $pdo->prepare("
         SELECT
             id,
-            user_id,
-            assigned_at
+            user_id
         FROM order_assignments
         WHERE order_id = :order_id
           AND completed_at IS NULL
@@ -184,14 +133,7 @@ try {
 
     $assignment = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    /*
-    |--------------------------------------------------------------------------
-    | No Active Assignment
-    |--------------------------------------------------------------------------
-    */
-
     if (!$assignment) {
-
         $pdo->rollBack();
 
         http_response_code(409);
@@ -199,19 +141,15 @@ try {
         echo json_encode([
             'success' => false,
             'message' => 'This order has no active assignment'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
 
         exit;
     }
 
     /*
-    |--------------------------------------------------------------------------
-    | Only Responsible User Can Cancel
-    |--------------------------------------------------------------------------
-    */
-
+     * Only responsible user can cancel
+     */
     if ((int) $assignment['user_id'] !== $userId) {
-
         $pdo->rollBack();
 
         http_response_code(403);
@@ -219,39 +157,36 @@ try {
         echo json_encode([
             'success' => false,
             'message' => 'Only the responsible user can cancel this assignment'
-        ]);
+        ], JSON_UNESCAPED_UNICODE);
 
         exit;
     }
 
     /*
-    |--------------------------------------------------------------------------
-    | Cancel Assignment
-    |--------------------------------------------------------------------------
-    */
-
+     * Cancel assignment
+     */
     $stmt = $pdo->prepare("
         UPDATE order_assignments
         SET cancelled_at = CURRENT_TIMESTAMP
         WHERE id = :assignment_id
+          AND completed_at IS NULL
+          AND cancelled_at IS NULL
     ");
 
     $stmt->execute([
-        'assignment_id' => $assignment['id']
+        'assignment_id' => (int) $assignment['id']
     ]);
 
     /*
-    |--------------------------------------------------------------------------
-    | Return Order To Pending
-    |--------------------------------------------------------------------------
-    */
-
+     * Return order to pending
+     */
     $stmt = $pdo->prepare("
         UPDATE orders
         SET
             status = 'pending',
             updated_at = CURRENT_TIMESTAMP
         WHERE id = :order_id
+          AND status = 'reserved'
     ");
 
     $stmt->execute([
@@ -259,16 +194,15 @@ try {
     ]);
 
     /*
-    |--------------------------------------------------------------------------
-    | Notify Other Group Members
-    |--------------------------------------------------------------------------
-    */
-
+     * Notify other members
+     *
+     * actor_user_id = user who cancelled responsibility
+     */
     $stmt = $pdo->prepare("
         SELECT user_id
         FROM group_members
         WHERE group_id = :group_id
-          AND user_id != :user_id
+          AND user_id <> :user_id
     ");
 
     $stmt->execute([
@@ -283,6 +217,7 @@ try {
         createNotification(
             $pdo,
             (int) $memberId,
+            $userId,
             'order_unassigned',
             'لغو مسئولیت سفارش',
             "مسئولیت سفارش «{$orderTitle}» لغو شد.",
@@ -291,24 +226,12 @@ try {
         );
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Commit
-    |--------------------------------------------------------------------------
-    */
-
     $pdo->commit();
-
-    /*
-    |--------------------------------------------------------------------------
-    | Success
-    |--------------------------------------------------------------------------
-    */
 
     echo json_encode([
         'success' => true,
         'message' => 'Order assignment cancelled successfully'
-    ]);
+    ], JSON_UNESCAPED_UNICODE);
 
 } catch (PDOException $e) {
 
@@ -321,5 +244,5 @@ try {
     echo json_encode([
         'success' => false,
         'message' => 'Server error'
-    ]);
+    ], JSON_UNESCAPED_UNICODE);
 }

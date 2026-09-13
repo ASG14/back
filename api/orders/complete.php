@@ -47,9 +47,7 @@ try {
     $pdo->beginTransaction();
 
     /*
-     * Find order
-     *
-     * Locking the order prevents concurrent completion/update problems.
+     * Lock order
      */
     $stmt = $pdo->prepare("
         SELECT
@@ -70,7 +68,6 @@ try {
     $order = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$order) {
-
         $pdo->rollBack();
 
         http_response_code(404);
@@ -86,11 +83,7 @@ try {
     $groupId = (int) $order['group_id'];
     $orderTitle = $order['title'];
 
-    /*
-     * Order is already completed
-     */
     if ($order['status'] === 'completed') {
-
         $pdo->rollBack();
 
         http_response_code(409);
@@ -104,7 +97,7 @@ try {
     }
 
     /*
-     * Check that the current user is an active member of the group.
+     * Check membership
      */
     $stmt = $pdo->prepare("
         SELECT 1
@@ -112,7 +105,6 @@ try {
         WHERE group_id = :group_id
           AND user_id = :user_id
         LIMIT 1
-        FOR UPDATE
     ");
 
     $stmt->execute([
@@ -120,10 +112,7 @@ try {
         'user_id' => $userId
     ]);
 
-    $isMember = $stmt->fetchColumn();
-
-    if (!$isMember) {
-
+    if (!$stmt->fetchColumn()) {
         $pdo->rollBack();
 
         http_response_code(403);
@@ -137,16 +126,7 @@ try {
     }
 
     /*
-     * Find the active assignment of this order.
-     *
-     * An assignment is active only when:
-     *
-     * completed_at IS NULL
-     * AND
-     * cancelled_at IS NULL
-     *
-     * Cancelled assignments are historical records and must
-     * not prevent an unassigned order from being completed.
+     * Find active assignment
      */
     $stmt = $pdo->prepare("
         SELECT
@@ -167,17 +147,13 @@ try {
     $assignment = $stmt->fetch(PDO::FETCH_ASSOC);
 
     /*
-     * Case 1:
-     * Order has an active responsible user.
-     *
-     * Only that user can complete the order.
+     * If assigned, only assigned user can complete.
      */
     if ($assignment) {
 
         $assignedUserId = (int) $assignment['user_id'];
 
         if ($assignedUserId !== $userId) {
-
             $pdo->rollBack();
 
             http_response_code(403);
@@ -191,29 +167,20 @@ try {
         }
 
         /*
-         * Complete the active assignment.
+         * Complete assignment
          */
         $stmt = $pdo->prepare("
             UPDATE order_assignments
             SET completed_at = CURRENT_TIMESTAMP
-            WHERE id = :id
+            WHERE id = :assignment_id
               AND completed_at IS NULL
               AND cancelled_at IS NULL
         ");
 
         $stmt->execute([
-            'id' => $assignment['id']
+            'assignment_id' => (int) $assignment['id']
         ]);
     }
-
-    /*
-     * Case 2:
-     * Order has no active responsible user.
-     *
-     * Any member of the group is allowed to complete it.
-     *
-     * No assignment record needs to be created.
-     */
 
     /*
      * Complete order
@@ -224,7 +191,7 @@ try {
             status = 'completed',
             updated_at = CURRENT_TIMESTAMP
         WHERE id = :order_id
-          AND status != 'completed'
+          AND status <> 'completed'
     ");
 
     $stmt->execute([
@@ -232,13 +199,15 @@ try {
     ]);
 
     /*
-     * Notify other group members
+     * Notify other members
+     *
+     * actor_user_id = user who completed the order
      */
     $stmt = $pdo->prepare("
         SELECT user_id
         FROM group_members
         WHERE group_id = :group_id
-          AND user_id != :user_id
+          AND user_id <> :user_id
     ");
 
     $stmt->execute([
@@ -253,6 +222,7 @@ try {
         createNotification(
             $pdo,
             (int) $memberId,
+            $userId,
             'order_completed',
             'سفارش خریداری شد',
             "سفارش «{$orderTitle}» خریداری شد.",
